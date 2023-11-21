@@ -202,14 +202,32 @@ class NeuSModel(BaseModel):
         n_rays = rays.shape[0]
         rays_o, rays_d = rays[:, 0:3], rays[:, 3:6] # both (N_rays, 3)
 
+        def alpha_fn(t_starts, t_ends, ray_indices):
+            ray_indices = ray_indices.long()
+            t_origins = rays_o[ray_indices]
+            t_dirs = rays_d[ray_indices]
+            midpoints = (t_starts + t_ends)[..., None] / 2.
+            x = t_origins + t_dirs * midpoints
+            
+            sdf = self.geometry(x, with_grad=False, with_feature=False)
+            inv_s = self.variance(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)
+            inv_s = inv_s.expand(sdf.shape[0], 1)
+            estimated_next_sdf = sdf[...,None] - self.render_step_size * 0.5
+            estimated_prev_sdf = sdf[...,None] + self.render_step_size * 0.5
+            prev_cdf = torch.sigmoid(estimated_prev_sdf * inv_s)
+            next_cdf = torch.sigmoid(estimated_next_sdf * inv_s)
+            p = prev_cdf - next_cdf
+            c = prev_cdf
+            alpha = ((p + 1e-5) / (c + 1e-5)).view(-1, 1).clip(0.0, 1.0)
+            return alpha[:, 0]
         with torch.no_grad():
             ray_indices, t_starts, t_ends = self.occupancy_grid.sampling(
                 rays_o, rays_d,
-                alpha_fn=None,
+                alpha_fn=alpha_fn,
+                alpha_thre=0.001,
                 render_step_size=self.render_step_size,
                 stratified=self.randomized,
                 cone_angle=0.0,
-                alpha_thre=0.0
             )
         
         ray_indices = ray_indices.long()
